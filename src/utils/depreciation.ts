@@ -8,7 +8,10 @@ import type {
   BudgetSummary,
   Plan,
   PlanComparison,
-  DepreciationMethod
+  DepreciationMethod,
+  DepartmentYearDiff,
+  MaxPressureDepartment,
+  PlanConclusion
 } from '../types'
 import { DEPRECIATION_METHODS } from '../types'
 
@@ -23,8 +26,39 @@ export function formatDate(date: Date): string {
 }
 
 export function parseDate(dateStr: string): Date {
-  const [year, month] = dateStr.split('-').map(Number)
-  return new Date(year, month - 1, 1)
+  if (!dateStr) return new Date()
+  
+  let year: number
+  let month: number
+  
+  if (dateStr.includes('-') || dateStr.includes('/')) {
+    const parts = dateStr.split(/[-/]/).filter(p => p)
+    if (parts.length >= 2) {
+      year = parseInt(parts[0])
+      month = parseInt(parts[1]) - 1
+      if (year < 100) year += 2000
+      return new Date(year, month, 1)
+    }
+  }
+  
+  if (/^\d{6}$/.test(dateStr)) {
+    year = parseInt(dateStr.slice(0, 4))
+    month = parseInt(dateStr.slice(4, 6)) - 1
+    return new Date(year, month, 1)
+  }
+  
+  if (/^\d{4}\d{2}$/.test(dateStr)) {
+    year = parseInt(dateStr.slice(0, 4))
+    month = parseInt(dateStr.slice(4, 6)) - 1
+    return new Date(year, month, 1)
+  }
+  
+  const date = new Date(dateStr)
+  if (!isNaN(date.getTime())) {
+    return new Date(date.getFullYear(), date.getMonth(), 1)
+  }
+  
+  return new Date()
 }
 
 export function addMonths(date: Date, months: number): Date {
@@ -64,17 +98,39 @@ export function calculateStraightLine(
   startDate: Date,
   accumulatedDepreciation: number = 0
 ): MonthDepreciation[] {
-  const monthlyDepreciation = (originalValue - salvageValue) / usefulLifeMonths
+  const totalDepreciable = originalValue - salvageValue
+  const monthlyDepreciation = totalDepreciable / usefulLifeMonths
   const result: MonthDepreciation[] = []
   
-  let currentNetValue = originalValue - accumulatedDepreciation
-  let currentAccumulated = accumulatedDepreciation
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), 1)
   
-  for (let i = 0; i < usefulLifeMonths; i++) {
-    const currentDate = addMonths(startDate, i)
-    const depreciation = i === usefulLifeMonths - 1 
-      ? currentNetValue - salvageValue 
-      : monthlyDepreciation
+  const monthsDepreciated = Math.max(0, monthsBetween(startDate, today))
+  const remainingMonths = Math.max(0, usefulLifeMonths - monthsDepreciated)
+  
+  const maxAllowedAccumulated = Math.min(accumulatedDepreciation, totalDepreciable)
+  let currentAccumulated = maxAllowedAccumulated
+  let currentNetValue = originalValue - currentAccumulated
+  
+  if (remainingMonths === 0 || currentNetValue <= salvageValue + 0.01) {
+    return []
+  }
+  
+  const remainingDepreciable = currentNetValue - salvageValue
+  const adjustedMonthlyDepreciation = remainingDepreciable / remainingMonths
+  
+  for (let i = 0; i < remainingMonths; i++) {
+    const monthIndex = monthsDepreciated + i
+    const currentDate = addMonths(startDate, monthIndex)
+    let depreciation: number
+    
+    if (i === remainingMonths - 1) {
+      depreciation = currentNetValue - salvageValue
+    } else {
+      depreciation = adjustedMonthlyDepreciation
+    }
+    
+    depreciation = Math.max(0, depreciation)
     
     currentAccumulated += depreciation
     currentNetValue -= depreciation
@@ -84,7 +140,7 @@ export function calculateStraightLine(
       month: currentDate.getMonth() + 1,
       depreciation: Math.round(depreciation * 100) / 100,
       accumulatedDepreciation: Math.round(currentAccumulated * 100) / 100,
-      netValue: Math.round(currentNetValue * 100) / 100
+      netValue: Math.max(salvageValue, Math.round(currentNetValue * 100) / 100)
     })
   }
   
@@ -99,36 +155,52 @@ export function calculateDoubleDeclining(
   accumulatedDepreciation: number = 0
 ): MonthDepreciation[] {
   const result: MonthDepreciation[] = []
+  const totalDepreciable = originalValue - salvageValue
   const straightLineRate = 1 / (usefulLifeMonths / 12)
   const doubleRate = straightLineRate * 2
   const monthlyRate = doubleRate / 12
   
-  let currentNetValue = originalValue - accumulatedDepreciation
-  let currentAccumulated = accumulatedDepreciation
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), 1)
+  
+  const monthsDepreciated = Math.max(0, monthsBetween(startDate, today))
+  const remainingMonths = Math.max(0, usefulLifeMonths - monthsDepreciated)
+  
+  const maxAllowedAccumulated = Math.min(accumulatedDepreciation, totalDepreciable)
+  let currentAccumulated = maxAllowedAccumulated
+  let currentNetValue = originalValue - currentAccumulated
+  
+  if (remainingMonths === 0 || currentNetValue <= salvageValue + 0.01) {
+    return []
+  }
+  
   let switchToStraightLine = false
   
-  for (let i = 0; i < usefulLifeMonths; i++) {
-    const currentDate = addMonths(startDate, i)
-    const remainingMonths = usefulLifeMonths - i
+  for (let i = 0; i < remainingMonths; i++) {
+    const monthIndex = monthsDepreciated + i
+    const currentDate = addMonths(startDate, monthIndex)
+    const remainingMonthsNow = usefulLifeMonths - monthIndex
     let depreciation: number
     
     if (!switchToStraightLine) {
       const doubleDecliningDep = currentNetValue * monthlyRate
-      const straightLineDep = (currentNetValue - salvageValue) / remainingMonths
+      const straightLineDep = (currentNetValue - salvageValue) / remainingMonthsNow
       
-      if (doubleDecliningDep < straightLineDep || remainingMonths <= 24) {
+      if (doubleDecliningDep < straightLineDep || remainingMonthsNow <= 24) {
         switchToStraightLine = true
-        depreciation = (currentNetValue - salvageValue) / remainingMonths
+        depreciation = (currentNetValue - salvageValue) / remainingMonthsNow
       } else {
         depreciation = doubleDecliningDep
       }
     } else {
-      depreciation = (currentNetValue - salvageValue) / remainingMonths
+      depreciation = (currentNetValue - salvageValue) / remainingMonthsNow
     }
     
-    if (i === usefulLifeMonths - 1) {
+    if (i === remainingMonths - 1) {
       depreciation = currentNetValue - salvageValue
     }
+    
+    depreciation = Math.max(0, depreciation)
     
     currentAccumulated += depreciation
     currentNetValue -= depreciation
@@ -138,7 +210,7 @@ export function calculateDoubleDeclining(
       month: currentDate.getMonth() + 1,
       depreciation: Math.round(depreciation * 100) / 100,
       accumulatedDepreciation: Math.round(currentAccumulated * 100) / 100,
-      netValue: Math.round(currentNetValue * 100) / 100
+      netValue: Math.max(salvageValue, Math.round(currentNetValue * 100) / 100)
     })
   }
   
@@ -153,26 +225,40 @@ export function calculateSumOfYears(
   accumulatedDepreciation: number = 0
 ): MonthDepreciation[] {
   const result: MonthDepreciation[] = []
+  const totalDepreciable = originalValue - salvageValue
   const usefulYears = usefulLifeMonths / 12
   const sumOfYears = (usefulYears * (usefulYears + 1)) / 2
-  const depreciableBase = originalValue - salvageValue
   
-  let currentAccumulated = accumulatedDepreciation
-  let currentNetValue = originalValue - accumulatedDepreciation
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), 1)
   
-  for (let i = 0; i < usefulLifeMonths; i++) {
-    const currentDate = addMonths(startDate, i)
-    const currentYear = Math.floor(i / 12)
+  const monthsDepreciated = Math.max(0, monthsBetween(startDate, today))
+  const remainingMonths = Math.max(0, usefulLifeMonths - monthsDepreciated)
+  
+  const maxAllowedAccumulated = Math.min(accumulatedDepreciation, totalDepreciable)
+  let currentAccumulated = maxAllowedAccumulated
+  let currentNetValue = originalValue - currentAccumulated
+  
+  if (remainingMonths === 0 || currentNetValue <= salvageValue + 0.01) {
+    return []
+  }
+  
+  for (let i = 0; i < remainingMonths; i++) {
+    const monthIndex = monthsDepreciated + i
+    const currentDate = addMonths(startDate, monthIndex)
+    const currentYear = Math.floor(monthIndex / 12)
     const remainingYears = usefulYears - currentYear
     const yearlyRate = remainingYears / sumOfYears
-    const yearlyDepreciation = depreciableBase * yearlyRate
+    const yearlyDepreciation = totalDepreciable * yearlyRate
     const monthlyDepreciation = yearlyDepreciation / 12
     
     let depreciation = monthlyDepreciation
     
-    if (i === usefulLifeMonths - 1) {
+    if (i === remainingMonths - 1) {
       depreciation = currentNetValue - salvageValue
     }
+    
+    depreciation = Math.max(0, depreciation)
     
     currentAccumulated += depreciation
     currentNetValue -= depreciation
@@ -182,7 +268,7 @@ export function calculateSumOfYears(
       month: currentDate.getMonth() + 1,
       depreciation: Math.round(depreciation * 100) / 100,
       accumulatedDepreciation: Math.round(currentAccumulated * 100) / 100,
-      netValue: Math.round(currentNetValue * 100) / 100
+      netValue: Math.max(salvageValue, Math.round(currentNetValue * 100) / 100)
     })
   }
   
@@ -197,6 +283,15 @@ export function calculateAssetDepreciation(
   const usefulLifeMonths = asset.usefulLife * 12
   const salvageValue = asset.originalValue * asset.salvageRate
   const endDate = addMonths(startDate, usefulLifeMonths)
+  const totalDepreciable = asset.originalValue - salvageValue
+  
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), 1)
+  const monthsDepreciated = Math.max(0, monthsBetween(startDate, today))
+  const remainingMonths = Math.max(0, usefulLifeMonths - monthsDepreciated)
+  
+  const maxAllowedAccumulated = Math.min(asset.accumulatedDepreciation, totalDepreciable)
+  const adjustedAccumulated = maxAllowedAccumulated
   
   let monthDepreciations: MonthDepreciation[]
   
@@ -207,7 +302,7 @@ export function calculateAssetDepreciation(
         salvageValue,
         usefulLifeMonths,
         startDate,
-        asset.accumulatedDepreciation
+        adjustedAccumulated
       )
       break
     case 'sum-of-years':
@@ -216,7 +311,7 @@ export function calculateAssetDepreciation(
         salvageValue,
         usefulLifeMonths,
         startDate,
-        asset.accumulatedDepreciation
+        adjustedAccumulated
       )
       break
     case 'straight-line':
@@ -226,15 +321,16 @@ export function calculateAssetDepreciation(
         salvageValue,
         usefulLifeMonths,
         startDate,
-        asset.accumulatedDepreciation
+        adjustedAccumulated
       )
   }
   
-  const totalDepreciation = monthDepreciations.reduce((sum, m) => sum + m.depreciation, 0)
+  const futureDepreciation = monthDepreciations.reduce((sum, m) => sum + m.depreciation, 0)
+  const totalDepreciation = adjustedAccumulated + futureDepreciation
   
-  const startYear = startDate.getFullYear()
+  const firstCalendarYear = monthDepreciations.length > 0 ? monthDepreciations[0].year : startDate.getFullYear()
   const firstYearDepreciation = monthDepreciations
-    .filter(m => m.year === startYear)
+    .filter(m => m.year === firstCalendarYear)
     .reduce((sum, m) => sum + m.depreciation, 0)
   
   const endYear = endDate.getFullYear()
@@ -242,9 +338,6 @@ export function calculateAssetDepreciation(
     .filter(m => m.year === endYear)
     .reduce((sum, m) => sum + m.depreciation, 0)
   
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), 1)
-  const remainingMonths = Math.max(0, monthsBetween(today, endDate))
   const isNearEnd = remainingMonths > 0 && remainingMonths <= nearEndMonths
   
   return {
@@ -284,6 +377,8 @@ export function calculateDepartmentSummaries(
 ): DepartmentSummary[] {
   const budgetStart = parseDate(budgetStartDate)
   const budgetEnd = addMonths(budgetStart, budgetYears * 12)
+  const budgetStartYear = budgetStart.getFullYear()
+  const budgetEndYear = budgetEnd.getFullYear()
   
   const departmentMap = new Map<string, {
     assetCount: number
@@ -305,7 +400,12 @@ export function calculateDepartmentSummaries(
       ? yearDepreciation / relevantDepreciations.length
       : 0
     
-    const latest = result.monthDepreciations[result.monthDepreciations.length - 1]
+    const openingAccumulated = result.monthDepreciations.length > 0 
+      ? (result.monthDepreciations[0].accumulatedDepreciation - result.monthDepreciations[0].depreciation)
+      : (result.originalValue - result.salvageValue)
+    
+    const closingAccumulated = openingAccumulated + yearDepreciation
+    const closingNetValue = result.originalValue - closingAccumulated
     
     if (!departmentMap.has(result.department)) {
       departmentMap.set(result.department, {
@@ -323,8 +423,8 @@ export function calculateDepartmentSummaries(
     dept.totalOriginalValue += result.originalValue
     dept.yearDepreciation += yearDepreciation
     dept.monthDepreciation += monthDepreciation
-    dept.accumulatedDepreciation += result.monthDepreciations[0]?.accumulatedDepreciation || 0
-    dept.netValue += latest?.netValue || 0
+    dept.accumulatedDepreciation += closingAccumulated
+    dept.netValue += Math.max(result.salvageValue, closingNetValue)
   }
   
   return Array.from(departmentMap.entries()).map(([department, data]) => ({
@@ -397,32 +497,43 @@ export function calculateYearSummaries(
   const budgetStart = parseDate(budgetStartDate)
   const startYear = budgetStart.getFullYear()
   
-  const yearMap = new Map<number, {
-    depreciation: number
-    accumulatedDepreciation: number
-  }>()
+  const yearDepreciationMap = new Map<number, number>()
+  const assetOpeningAccumulated = new Map<string, number>()
   
   for (let y = 0; y < budgetYears; y++) {
-    yearMap.set(startYear + y, { depreciation: 0, accumulatedDepreciation: 0 })
+    yearDepreciationMap.set(startYear + y, 0)
   }
   
   for (const result of results) {
+    const firstMonth = result.monthDepreciations[0]
+    const openingAccumulated = firstMonth 
+      ? (firstMonth.accumulatedDepreciation - firstMonth.depreciation)
+      : (result.originalValue - result.salvageValue)
+    assetOpeningAccumulated.set(result.assetId, openingAccumulated)
+    
     for (const m of result.monthDepreciations) {
-      if (yearMap.has(m.year)) {
-        const yearData = yearMap.get(m.year)!
-        yearData.depreciation += m.depreciation
-        yearData.accumulatedDepreciation = Math.max(yearData.accumulatedDepreciation, m.accumulatedDepreciation)
+      if (yearDepreciationMap.has(m.year)) {
+        const current = yearDepreciationMap.get(m.year)!
+        yearDepreciationMap.set(m.year, current + m.depreciation)
       }
     }
   }
   
-  return Array.from(yearMap.entries())
+  const totalOpeningAccumulated = Array.from(assetOpeningAccumulated.values())
+    .reduce((sum, v) => sum + v, 0)
+  
+  let runningAccumulated = totalOpeningAccumulated
+  
+  return Array.from(yearDepreciationMap.entries())
     .sort((a, b) => a[0] - b[0])
-    .map(([year, data]) => ({
-      year,
-      depreciation: Math.round(data.depreciation * 100) / 100,
-      accumulatedDepreciation: Math.round(data.accumulatedDepreciation * 100) / 100
-    }))
+    .map(([year, depreciation]) => {
+      runningAccumulated += depreciation
+      return {
+        year,
+        depreciation: Math.round(depreciation * 100) / 100,
+        accumulatedDepreciation: Math.round(runningAccumulated * 100) / 100
+      }
+    })
 }
 
 export function calculateBudgetSummary(
@@ -497,4 +608,203 @@ export function calculatePlanComparison(plan: Plan): PlanComparison {
 
 export function comparePlans(plans: Plan[]): PlanComparison[] {
   return plans.map(plan => calculatePlanComparison(plan))
+}
+
+export function calculateDepartmentYearDiff(
+  results: AssetDepreciationResult[],
+  baseResults: AssetDepreciationResult[],
+  budgetStartDate: string,
+  budgetYears: number
+): DepartmentYearDiff[] {
+  const budgetStart = parseDate(budgetStartDate)
+  const startYear = budgetStart.getFullYear()
+  
+  const deptYearMap = new Map<string, {
+    year1: number
+    year2: number
+    year3: number
+    baseYear1: number
+    baseYear2: number
+    baseYear3: number
+  }>()
+  
+  const addToMap = (
+    result: AssetDepreciationResult,
+    isBase: boolean
+  ) => {
+    const dept = result.department
+    if (!deptYearMap.has(dept)) {
+      deptYearMap.set(dept, { year1: 0, year2: 0, year3: 0, baseYear1: 0, baseYear2: 0, baseYear3: 0 })
+    }
+    const entry = deptYearMap.get(dept)!
+    
+    for (const m of result.monthDepreciations) {
+      if (m.year === startYear) {
+        if (isBase) entry.baseYear1 += m.depreciation
+        else entry.year1 += m.depreciation
+      } else if (m.year === startYear + 1) {
+        if (isBase) entry.baseYear2 += m.depreciation
+        else entry.year2 += m.depreciation
+      } else if (m.year === startYear + 2) {
+        if (isBase) entry.baseYear3 += m.depreciation
+        else entry.year3 += m.depreciation
+      }
+    }
+  }
+  
+  for (const result of results) addToMap(result, false)
+  for (const result of baseResults) addToMap(result, true)
+  
+  return Array.from(deptYearMap.entries()).map(([department, data]) => ({
+    department,
+    year1Diff: Math.round((data.year1 - data.baseYear1) * 100) / 100,
+    year2Diff: Math.round((data.year2 - data.baseYear2) * 100) / 100,
+    year3Diff: Math.round((data.year3 - data.baseYear3) * 100) / 100,
+    totalDiff: Math.round((data.year1 + data.year2 + data.year3 - data.baseYear1 - data.baseYear2 - data.baseYear3) * 100) / 100
+  })).sort((a, b) => Math.abs(b.totalDiff) - Math.abs(a.totalDiff))
+}
+
+export function findMaxPressureDepartment(
+  results: AssetDepreciationResult[],
+  budgetStartDate: string
+): MaxPressureDepartment {
+  const budgetStart = parseDate(budgetStartDate)
+  const startYear = budgetStart.getFullYear()
+  
+  const deptMap = new Map<string, number>()
+  
+  for (const result of results) {
+    const dept = result.department
+    if (!deptMap.has(dept)) deptMap.set(dept, 0)
+    
+    const year1Depreciation = result.monthDepreciations
+      .filter(m => m.year === startYear)
+      .reduce((sum, m) => sum + m.depreciation, 0)
+    
+    deptMap.set(dept, deptMap.get(dept)! + year1Depreciation)
+  }
+  
+  const totalFirstYear = Array.from(deptMap.values()).reduce((sum, v) => sum + v, 0)
+  
+  let maxDept = ''
+  let maxValue = 0
+  
+  for (const [dept, value] of deptMap.entries()) {
+    if (value > maxValue) {
+      maxValue = value
+      maxDept = dept
+    }
+  }
+  
+  return {
+    department: maxDept,
+    firstYearDepreciation: Math.round(maxValue * 100) / 100,
+    percentageOfTotal: totalFirstYear > 0 ? Math.round((maxValue / totalFirstYear) * 10000) / 100 : 0
+  }
+}
+
+export function generatePlanConclusion(
+  plans: Plan[],
+  basePlanIndex: number = 0
+): PlanConclusion {
+  const basePlan = plans[basePlanIndex]
+  if (!basePlan || plans.length < 2) {
+    return {
+      planNames: plans.map(p => p.name),
+      basePlanName: basePlan?.name || '',
+      totalOriginalValueByPlan: {},
+      firstYearDepreciationByPlan: {},
+      totalDepreciationByPlan: {},
+      departmentYearDiffs: [],
+      maxPressureDepartments: {},
+      recommendation: '请至少选择两个方案进行对比分析',
+      keyPoints: [],
+      generatedAt: new Date().toLocaleString('zh-CN')
+    }
+  }
+  
+  const planNames = plans.map(p => p.name)
+  const totalOriginalValueByPlan: { [key: string]: number } = {}
+  const firstYearDepreciationByPlan: { [key: string]: number } = {}
+  const totalDepreciationByPlan: { [key: string]: number } = {}
+  const maxPressureDepartments: { [key: string]: MaxPressureDepartment } = {}
+  
+  const allResults: AssetDepreciationResult[][] = []
+  const allComparisons: PlanComparison[] = []
+  
+  for (const plan of plans) {
+    const results = calculateAllAssetsDepreciation(plan.assets, plan.params.nearEndMonths)
+    const comparison = calculatePlanComparison(plan)
+    const maxPressure = findMaxPressureDepartment(results, plan.params.budgetStartDate)
+    
+    allResults.push(results)
+    allComparisons.push(comparison)
+    maxPressureDepartments[plan.name] = maxPressure
+    totalOriginalValueByPlan[plan.name] = comparison.totalOriginalValue
+    firstYearDepreciationByPlan[plan.name] = comparison.firstYearDepreciation
+    totalDepreciationByPlan[plan.name] = comparison.totalDepreciation
+  }
+  
+  const departmentYearDiffs = calculateDepartmentYearDiff(
+    allResults[1],
+    allResults[0],
+    basePlan.params.budgetStartDate,
+    basePlan.params.budgetYears
+  )
+  
+  const baseComparison = allComparisons[0]
+  const otherComparisons = allComparisons.slice(1)
+  
+  let recommendation = ''
+  const keyPoints: string[] = []
+  
+  const minTotalDepreciation = Math.min(...allComparisons.map(c => c.totalDepreciation))
+  const minFirstYearDepreciation = Math.min(...allComparisons.map(c => c.firstYearDepreciation))
+  
+  const lowestTotalPlan = allComparisons.find(c => c.totalDepreciation === minTotalDepreciation)
+  const lowestFirstYearPlan = allComparisons.find(c => c.firstYearDepreciation === minFirstYearDepreciation)
+  
+  keyPoints.push(`方案共涉及资产 ${basePlan.assets.length} 项，原值合计 ${formatNumber(baseComparison.totalOriginalValue)} 元`)
+  
+  if (lowestTotalPlan && lowestFirstYearPlan) {
+    if (lowestTotalPlan.planName === lowestFirstYearPlan.planName) {
+      recommendation = `综合来看，「${lowestTotalPlan.planName}」在折旧总额和首年压力方面均表现最优，建议优先考虑。`
+    } else {
+      const totalDiff = baseComparison.totalDepreciation - lowestTotalPlan.totalDepreciation
+      const firstYearDiff = baseComparison.firstYearDepreciation - lowestFirstYearPlan.firstYearDepreciation
+      
+      if (Math.abs(totalDiff) > Math.abs(firstYearDiff) * 2) {
+        recommendation = `「${lowestTotalPlan.planName}」长期成本更低（三年合计节省 ${formatNumber(Math.abs(totalDiff))} 元），若预算周期较长建议优先选择；若首年预算紧张，可考虑「${lowestFirstYearPlan.planName}」。`
+      } else {
+        recommendation = `「${lowestFirstYearPlan.planName}」首年预算压力最小（节省 ${formatNumber(Math.abs(firstYearDiff))} 元），适合当期预算有限的情况；「${lowestTotalPlan.planName}」则在全周期成本上更有优势。`
+      }
+    }
+  }
+  
+  const maxPressure = maxPressureDepartments[basePlan.name]
+  if (maxPressure && maxPressure.department) {
+    keyPoints.push(`首年预算压力最大的部门是「${maxPressure.department}」，占首年折旧总额的 ${maxPressure.percentageOfTotal}%（${formatNumber(maxPressure.firstYearDepreciation)} 元）`)
+  }
+  
+  const significantDiffs = departmentYearDiffs.filter(d => Math.abs(d.totalDiff) >= 1000)
+  if (significantDiffs.length > 0) {
+    const topDiff = significantDiffs[0]
+    const direction = topDiff.totalDiff > 0 ? '增加' : '减少'
+    keyPoints.push(`两方案差异最大的部门是「${topDiff.department}」，三年折旧合计${direction} ${formatNumber(Math.abs(topDiff.totalDiff))} 元`)
+  }
+  
+  keyPoints.push(`首年折旧最高方案为 ${formatNumber(Math.max(...allComparisons.map(c => c.firstYearDepreciation)))} 元，最低为 ${formatNumber(minFirstYearDepreciation)} 元，差距 ${formatNumber(Math.max(...allComparisons.map(c => c.firstYearDepreciation)) - minFirstYearDepreciation)} 元`)
+  
+  return {
+    planNames,
+    basePlanName: basePlan.name,
+    totalOriginalValueByPlan,
+    firstYearDepreciationByPlan,
+    totalDepreciationByPlan,
+    departmentYearDiffs,
+    maxPressureDepartments,
+    recommendation,
+    keyPoints,
+    generatedAt: new Date().toLocaleString('zh-CN')
+  }
 }

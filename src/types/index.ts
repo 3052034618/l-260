@@ -92,8 +92,8 @@ export interface Plan {
 export interface PlanComparison {
   planId: string
   planName: string
-  totalOriginalValue: number
   assetCount: number
+  totalOriginalValue: number
   firstYearDepreciation: number
   secondYearDepreciation: number
   thirdYearDepreciation: number
@@ -101,6 +101,33 @@ export interface PlanComparison {
   averageYearDepreciation: number
   maxMonthDepreciation: number
   minMonthDepreciation: number
+}
+
+export interface DepartmentYearDiff {
+  department: string
+  year1Diff: number
+  year2Diff: number
+  year3Diff: number
+  totalDiff: number
+}
+
+export interface MaxPressureDepartment {
+  department: string
+  firstYearDepreciation: number
+  percentageOfTotal: number
+}
+
+export interface PlanConclusion {
+  planNames: string[]
+  basePlanName: string
+  totalOriginalValueByPlan: { [planName: string]: number }
+  firstYearDepreciationByPlan: { [planName: string]: number }
+  totalDepreciationByPlan: { [planName: string]: number }
+  departmentYearDiffs: DepartmentYearDiff[]
+  maxPressureDepartments: { [planName: string]: MaxPressureDepartment }
+  recommendation: string
+  keyPoints: string[]
+  generatedAt: string
 }
 
 export interface BudgetSummary {

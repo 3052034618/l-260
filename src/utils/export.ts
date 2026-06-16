@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx'
-import type { AssetDepreciationResult, BudgetSummary, PlanComparison } from '../types'
+import type { AssetDepreciationResult, BudgetSummary, PlanComparison, PlanConclusion } from '../types'
 import { formatCurrency, formatNumber } from './depreciation'
 
 const { ipcRenderer } = window.require ? window.require('electron') : { ipcRenderer: null }
@@ -232,31 +232,112 @@ export function generateDepreciationChartData(results: AssetDepreciationResult[]
   const depreciationData: number[] = []
   const accumulatedData: number[] = []
   
-  const monthMap = new Map<string, { depreciation: number; accumulated: number }>()
+  const monthMap = new Map<string, number>()
+  const assetOpeningAccumulated = new Map<string, number>()
   
   for (let y = 0; y < budgetYears; y++) {
     for (let m = 1; m <= 12; m++) {
       const key = `${startYear + y}-${String(m).padStart(2, '0')}`
-      monthMap.set(key, { depreciation: 0, accumulated: 0 })
+      monthMap.set(key, 0)
     }
   }
   
   for (const result of results) {
+    const firstMonth = result.monthDepreciations[0]
+    const openingAccumulated = firstMonth 
+      ? (firstMonth.accumulatedDepreciation - firstMonth.depreciation)
+      : (result.originalValue - result.salvageValue)
+    assetOpeningAccumulated.set(result.assetId, openingAccumulated)
+    
     for (const md of result.monthDepreciations) {
       const key = `${md.year}-${String(md.month).padStart(2, '0')}`
       if (monthMap.has(key)) {
-        const data = monthMap.get(key)!
-        data.depreciation += md.depreciation
-        data.accumulated = Math.max(data.accumulated, md.accumulatedDepreciation)
+        const current = monthMap.get(key)!
+        monthMap.set(key, current + md.depreciation)
       }
     }
   }
   
-  for (const [key, data] of Array.from(monthMap.entries()).sort()) {
+  const totalOpeningAccumulated = Array.from(assetOpeningAccumulated.values())
+    .reduce((sum, v) => sum + v, 0)
+  
+  let runningAccumulated = totalOpeningAccumulated
+  
+  for (const [key, depreciation] of Array.from(monthMap.entries()).sort()) {
     monthLabels.push(key)
-    depreciationData.push(Math.round(data.depreciation * 100) / 100)
-    accumulatedData.push(Math.round(data.accumulated * 100) / 100)
+    depreciationData.push(Math.round(depreciation * 100) / 100)
+    runningAccumulated += depreciation
+    accumulatedData.push(Math.round(runningAccumulated * 100) / 100)
   }
   
   return { monthLabels, depreciationData, accumulatedData }
+}
+
+export async function exportPlanConclusion(
+  conclusion: PlanConclusion,
+  filename: string = '方案结论摘要.xlsx'
+): Promise<boolean> {
+  const wb = XLSX.utils.book_new()
+  
+  const summaryData = [
+    { '项目': '方案名称', '值': conclusion.planNames.join(' vs ') },
+    { '项目': '基准方案', '值': conclusion.basePlanName },
+    { '项目': '生成时间', '值': conclusion.generatedAt },
+    { '项目': '', '值': '' },
+    { '项目': '建议', '值': conclusion.recommendation }
+  ]
+  
+  for (const planName of conclusion.planNames) {
+    summaryData.push({ '项目': '', '值': '' })
+    summaryData.push({ '项目': `【${planName}】原值合计`, '值': formatNumber(conclusion.totalOriginalValueByPlan[planName] || 0) })
+    summaryData.push({ '项目': `【${planName}】首年折旧`, '值': formatNumber(conclusion.firstYearDepreciationByPlan[planName] || 0) })
+    summaryData.push({ '项目': `【${planName}】折旧总额`, '值': formatNumber(conclusion.totalDepreciationByPlan[planName] || 0) })
+    const maxPressure = conclusion.maxPressureDepartments[planName]
+    if (maxPressure && maxPressure.department) {
+      summaryData.push({ '项目': `【${planName}】首年压力最大部门`, '值': `${maxPressure.department} (${maxPressure.percentageOfTotal}%)` })
+    }
+  }
+  
+  const ws1 = XLSX.utils.json_to_sheet(summaryData, { skipHeader: true })
+  ws1['!cols'] = [{ wch: 25 }, { wch: 60 }]
+  XLSX.utils.book_append_sheet(wb, ws1, '方案结论')
+  
+  if (conclusion.keyPoints.length > 0) {
+    const keyPointsData = conclusion.keyPoints.map((point, index) => ({
+      '序号': index + 1,
+      '关键结论': point
+    }))
+    const ws2 = XLSX.utils.json_to_sheet(keyPointsData)
+    ws2['!cols'] = [{ wch: 8 }, { wch: 80 }]
+    XLSX.utils.book_append_sheet(wb, ws2, '关键要点')
+  }
+  
+  if (conclusion.departmentYearDiffs.length > 0) {
+    const diffData = conclusion.departmentYearDiffs.map(d => ({
+      '部门': d.department,
+      '第一年差异': formatNumber(d.year1Diff),
+      '第二年差异': formatNumber(d.year2Diff),
+      '第三年差异': formatNumber(d.year3Diff),
+      '三年合计差异': formatNumber(d.totalDiff)
+    }))
+    const ws3 = XLSX.utils.json_to_sheet(diffData)
+    ws3['!cols'] = [{ wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 18 }]
+    XLSX.utils.book_append_sheet(wb, ws3, '部门差异分析')
+  }
+  
+  if (ipcRenderer) {
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    const buffer = Buffer.from(wbout)
+    
+    const result = await ipcRenderer.invoke('save-file', {
+      content: buffer,
+      filename,
+      filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
+    })
+    
+    return result.success
+  } else {
+    XLSX.writeFile(wb, filename)
+    return true
+  }
 }

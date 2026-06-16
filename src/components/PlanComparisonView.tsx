@@ -1,9 +1,9 @@
 import { useState, useCallback } from 'react'
 import { useApp } from '../contexts/AppContext'
-import { comparePlans } from '../utils/depreciation'
+import { comparePlans, generatePlanConclusion } from '../utils/depreciation'
 import { formatNumber } from '../utils/depreciation'
-import { exportPlanComparison } from '../utils/export'
-import type { PlanComparison } from '../types'
+import { exportPlanComparison, exportPlanConclusion } from '../utils/export'
+import type { PlanComparison, PlanConclusion } from '../types'
 
 export default function PlanComparisonView() {
   const { plans, saveCurrentAsPlan, deletePlan, loadPlan, assets, params } = useApp()
@@ -12,6 +12,7 @@ export default function PlanComparisonView() {
   const [planDescription, setPlanDescription] = useState('')
   const [selectedPlans, setSelectedPlans] = useState<string[]>([])
   const [comparisons, setComparisons] = useState<PlanComparison[]>([])
+  const [conclusion, setConclusion] = useState<PlanConclusion | null>(null)
 
   const handleSavePlan = useCallback(() => {
     if (!planName.trim()) {
@@ -44,7 +45,9 @@ export default function PlanComparisonView() {
     }
     const selectedPlanData = plans.filter(p => selectedPlans.includes(p.id))
     const result = comparePlans(selectedPlanData)
+    const conclusionResult = generatePlanConclusion(selectedPlanData, 0)
     setComparisons(result)
+    setConclusion(conclusionResult)
   }
 
   const handleLoadPlan = (planId: string) => {
@@ -59,6 +62,7 @@ export default function PlanComparisonView() {
       deletePlan(planId)
       setSelectedPlans(prev => prev.filter(id => id !== planId))
       setComparisons(prev => prev.filter(c => c.planId !== planId))
+      setConclusion(null)
     }
   }
 
@@ -70,6 +74,17 @@ export default function PlanComparisonView() {
     const success = await exportPlanComparison(comparisons)
     if (success) {
       alert('导出成功')
+    }
+  }
+
+  const handleExportConclusion = async () => {
+    if (!conclusion) {
+      alert('请先进行方案对比')
+      return
+    }
+    const success = await exportPlanConclusion(conclusion)
+    if (success) {
+      alert('方案结论摘要导出成功')
     }
   }
 
@@ -87,9 +102,14 @@ export default function PlanComparisonView() {
         <h2 className="text-xl font-bold text-gray-800">方案对比</h2>
         <div className="flex gap-3">
           {comparisons.length > 0 && (
-            <button className="btn-secondary" onClick={handleExportComparison}>
-              导出对比结果
-            </button>
+            <>
+              <button className="btn-secondary" onClick={handleExportConclusion}>
+                导出方案结论摘要
+              </button>
+              <button className="btn-secondary" onClick={handleExportComparison}>
+                导出详细对比表
+              </button>
+            </>
           )}
           <button className="btn-primary" onClick={() => setShowSaveModal(true)}>
             保存当前方案
@@ -366,6 +386,103 @@ export default function PlanComparisonView() {
                   ))}
                 </div>
               </div>
+
+              {conclusion && (
+                <>
+                  <div className="card p-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
+                    <div className="flex items-start gap-3">
+                      <div className="text-3xl">💡</div>
+                      <div>
+                        <h3 className="font-bold text-gray-800 mb-2">方案建议</h3>
+                        <p className="text-gray-700 leading-relaxed">{conclusion.recommendation}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card p-6">
+                    <h3 className="font-semibold text-gray-700 mb-4">关键要点</h3>
+                    <ul className="space-y-2">
+                      {conclusion.keyPoints.map((point, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-sm text-gray-600">
+                          <span className="text-blue-500 mt-0.5">•</span>
+                          <span>{point}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {conclusion.maxPressureDepartments && Object.keys(conclusion.maxPressureDepartments).length > 0 && (
+                    <div className="card p-6">
+                      <h3 className="font-semibold text-gray-700 mb-4">
+                        🚨 首年预算压力最大部门
+                      </h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {Object.entries(conclusion.maxPressureDepartments).map(([planName, data]) => (
+                            <div key={planName} className={`p-4 rounded-lg border-2 ${
+                              data.percentageOfTotal >= 40 ? 'bg-red-50 border-red-200' : 'bg-orange-50 border-orange-200'
+                            }`}>
+                              <p className="text-xs text-gray-500 mb-1">{planName}</p>
+                              <p className="text-lg font-bold text-gray-800">
+                                {data.department || '无数据'}
+                              </p>
+                              {data.department && (
+                                <p className="text-sm mt-1">
+                                  <span className="font-medium">{formatNumber(data.firstYearDepreciation)} 元</span>
+                                  <span className="text-gray-500">，占首年总额 {data.percentageOfTotal}%</span>
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                    </div>
+                  )}
+
+                  {conclusion.departmentYearDiffs && conclusion.departmentYearDiffs.length > 0 && (
+                    <div className="card">
+                      <div className="p-4 border-b border-gray-100">
+                        <h3 className="font-semibold text-gray-700">
+                          📊 部门年度费用差异分析
+                          <span className="ml-2 text-sm font-normal text-gray-500">
+                            （与基准方案对比）
+                          </span>
+                        </h3>
+                      </div>
+                      <div className="table-container">
+                        <table className="table">
+                          <thead>
+                            <tr>
+                              <th>部门</th>
+                              <th className="text-right">第一年差异</th>
+                              <th className="text-right">第二年差异</th>
+                              <th className="text-right">第三年差异</th>
+                              <th className="text-right">三年合计</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {conclusion.departmentYearDiffs.map((d, idx) => (
+                              <tr key={d.department}>
+                                <td className="font-medium">{d.department}</td>
+                                <td className={`text-right ${d.year1Diff > 0 ? 'text-red-600' : d.year1Diff < 0 ? 'text-green-600' : ''}`}>
+                                  {d.year1Diff > 0 ? '+' : ''}{formatNumber(d.year1Diff)}
+                                </td>
+                                <td className={`text-right ${d.year2Diff > 0 ? 'text-red-600' : d.year2Diff < 0 ? 'text-green-600' : ''}`}>
+                                  {d.year2Diff > 0 ? '+' : ''}{formatNumber(d.year2Diff)}
+                                </td>
+                                <td className={`text-right ${d.year3Diff > 0 ? 'text-red-600' : d.year3Diff < 0 ? 'text-green-600' : ''}`}>
+                                  {d.year3Diff > 0 ? '+' : ''}{formatNumber(d.year3Diff)}
+                                </td>
+                                <td className={`text-right font-medium ${d.totalDiff > 0 ? 'text-red-600' : d.totalDiff < 0 ? 'text-green-600' : ''}`}>
+                                  {d.totalDiff > 0 ? '+' : ''}{formatNumber(d.totalDiff)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>

@@ -1,5 +1,5 @@
 import type { Asset, DepreciationParams, Plan } from '../types'
-import { generateId } from './depreciation'
+import { generateId, parseDate, formatDate } from './depreciation'
 
 const STORAGE_KEYS = {
   ASSETS: 'depreciation_assets',
@@ -152,6 +152,12 @@ export function parsePasteData(text: string): Partial<Asset>[] {
             const rate = parseFloat(value)
             asset[field] = rate > 1 ? rate / 100 : rate
             break
+          case 'startDate':
+            const parsedDate = parseDate(value)
+            if (!isNaN(parsedDate.getTime())) {
+              asset[field] = formatDate(parsedDate)
+            }
+            break
           default:
             asset[field as keyof Asset] = value as any
         }
@@ -227,14 +233,11 @@ export function parseExcelData(data: any[][]): Partial<Asset>[] {
           case 'startDate':
             if (typeof data[i][idx] === 'number') {
               const date = new Date(Math.round((data[i][idx] - 25569) * 86400 * 1000))
-              asset[field] = date.toISOString().slice(0, 7)
+              asset[field] = formatDate(date)
             } else {
-              const dateStr = value
-              if (dateStr.includes('-') || dateStr.includes('/')) {
-                const parts = dateStr.split(/[-/]/)
-                if (parts.length >= 2) {
-                  asset[field] = `${parts[0]}-${parts[1].padStart(2, '0')}`
-                }
+              const parsedDate = parseDate(value)
+              if (!isNaN(parsedDate.getTime())) {
+                asset[field] = formatDate(parsedDate)
               }
             }
             break
